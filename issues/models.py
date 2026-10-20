@@ -1,9 +1,13 @@
 """
 OOP classes for DevTrack's two entities: Reporter and Issue.
 
-These are plain Python classes, not Django ORM models. DevTrack stores its
-data in JSON files, so each class only needs to validate itself and turn
-itself into a dict (to_dict) that can be saved to JSON or returned by a view.
+These are plain Python classes that hold the business rules: what makes a
+record valid (validate), how it becomes a dict (to_dict), and how an issue
+describes itself (describe). They don't know how records are stored; that
+is the job of issues/storage.py, which saves the dicts to JSON files or to
+PostgreSQL through the ORM models in issues/db_models.py.
+
+A new record has id=None until storage saves it and assigns an id.
 
 Class hierarchy:
 
@@ -41,6 +45,12 @@ def validate_positive_int(value, field_name):
         raise ValueError(f'{field_name} must be a positive integer')
 
 
+def validate_id(value):
+    # None means "not saved yet"; storage assigns the id on save
+    if value is not None:
+        validate_positive_int(value, 'id')
+
+
 def validate_non_empty_string(value, message):
     if not isinstance(value, str) or not value.strip():
         raise ValueError(message)
@@ -56,7 +66,7 @@ class Reporter(BaseEntity):
         self.team = team
 
     def validate(self):
-        validate_positive_int(self.id, 'id')
+        validate_id(self.id)
         validate_non_empty_string(self.name, 'Name cannot be empty')
         if not isinstance(self.email, str) or '@' not in self.email:
             raise ValueError('Invalid email')
@@ -76,7 +86,7 @@ class Issue(BaseEntity):
         self.created_at = created_at or str(datetime.now())
 
     def validate(self):
-        validate_positive_int(self.id, 'id')
+        validate_id(self.id)
         validate_non_empty_string(self.title, 'Title cannot be empty')
         if not isinstance(self.description, str):
             raise ValueError('Description must be a string')
@@ -102,3 +112,8 @@ class LowPriorityIssue(Issue):
 
     def describe(self):
         return f"{self.title} — low priority, handle when free"
+
+
+# Register the database tables with Django. Django only looks for ORM models
+# in each app's models module, so the ones in db_models.py are imported here.
+from issues.db_models import IssueModel, ReporterModel  # noqa: E402,F401

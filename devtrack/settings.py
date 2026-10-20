@@ -1,9 +1,9 @@
 """
 Django settings for the DevTrack project.
 
-DevTrack stores its data in JSON files (see DATA_DIR below), so no database
-is configured and none of Django's database-backed apps (admin, auth,
-sessions) are installed.
+DevTrack can store its data in two ways, chosen by STORAGE_BACKEND:
+  - 'database' (default): PostgreSQL running in Docker (see docker-compose.yaml)
+  - 'json':               the files data/reporters.json and data/issues.json
 
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
@@ -49,10 +49,31 @@ ROOT_URLCONF = 'devtrack.urls'
 WSGI_APPLICATION = 'devtrack.wsgi.application'
 
 
-# Database
-# Not used: records are stored in JSON files instead.
+# Storage backend: 'database' or 'json' (see issues/storage.py)
 
-DATABASES = {}
+STORAGE_BACKEND = os.environ.get('STORAGE_BACKEND', 'database')
+
+
+# Database
+# PostgreSQL in Docker. The defaults match docker-compose.yaml.
+# https://docs.djangoproject.com/en/6.1/ref/settings/#databases
+
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ.get('POSTGRES_DB', 'devtrack'),
+        'USER': os.environ.get('POSTGRES_USER', 'postgres'),
+        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'admin'),
+        'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
+        'PORT': os.environ.get('POSTGRES_PORT', '5433'),
+    }
+}
+
+# JSON mode needs no database, so it runs without Docker.
+if STORAGE_BACKEND == 'json':
+    DATABASES = {}
+
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
 # JSON file storage
@@ -70,4 +91,6 @@ TIME_ZONE = 'UTC'
 
 USE_I18N = True
 
-USE_TZ = True
+# Timestamps are plain local times, matching the brief's str(datetime.now()),
+# so created_at looks the same whichever storage backend is used.
+USE_TZ = False

@@ -1,10 +1,11 @@
 # DevTrack
 
-A minimal backend API for tracking engineering issues, like a stripped-down GitHub Issues. Engineers register as **reporters**, file **issues**, set priorities and track status.
+A minimal backend API for tracking engineering issues, like a stripped-down GitHub Issues. Engineers register as **reporters**, file **issues**, set priorities, update status and remove issues.
 
-Built with Django 6.1. Data is stored in two JSON files: `data/reporters.json` and `data/issues.json`. There is no database.
+Built with Django 6.1 and PostgreSQL 18 (running in Docker). The same API can also store everything in two JSON files (`data/reporters.json` and `data/issues.json`) with a single setting.
 
 - [How to run](#how-to-run)
+- [Storage: PostgreSQL or JSON files](#storage-postgresql-or-json-files)
 - [API endpoints](#api-endpoints)
 - [Data model and OOP design](#data-model-and-oop-design)
 - [Design decision](#design-decision)
@@ -15,28 +16,34 @@ Built with Django 6.1. Data is stored in two JSON files: `data/reporters.json` a
 
 ## How to run
 
-You need **Python 3.12 or newer**.
+You need **Python 3.12 or newer** and **Docker Desktop** (for PostgreSQL).
 
 ```bash
 # 1. Clone the repository
 git clone https://github.com/evsvipin/dev-track.git
 cd dev-track
 
-# 2. Create and activate a virtual environment
+# 2. Start PostgreSQL in Docker (port 5433)
+docker compose up -d
+
+# 3. Create and activate a virtual environment
 python -m venv .venv
 .venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # macOS / Linux
 
-# 3. Install dependencies
+# 4. Install dependencies
 pip install -r requirements.txt
 
-# 4. Start the server
+# 5. Create the database tables
+python manage.py migrate
+
+# 6. Start the server
 python manage.py runserver
 ```
 
 The API is now available at **http://127.0.0.1:8000/api/**.
 
-**Optional:** to set your own secret key or debug flag, copy `.env.example` to `.env` and edit it. Without a `.env` file the project runs with local development defaults.
+**Settings (optional):** everything works with the defaults. To change the secret key, the database password, or the storage backend, copy `.env.example` to `.env` and edit it. `docker-compose.yaml` reads the same `.env`.
 
 **Run the tests:**
 
@@ -44,7 +51,42 @@ The API is now available at **http://127.0.0.1:8000/api/**.
 python manage.py test
 ```
 
-The tests use a temporary folder, so they never change the real JSON files.
+There are 67 tests. Every API test runs twice, once against PostgreSQL and once against the JSON files. The tests use a temporary test database and a temporary folder, so your real data is never touched.
+
+**Stop PostgreSQL:** `docker compose down`. Your data is kept in the `postgres_data` Docker volume.
+
+---
+
+## Storage: PostgreSQL or JSON files
+
+The `STORAGE_BACKEND` setting decides where records are saved:
+
+| `STORAGE_BACKEND` | Where data goes | Needs Docker? |
+|---|---|---|
+| `database` (default) | PostgreSQL tables `reporters` and `issues` | Yes |
+| `json` | `data/reporters.json` and `data/issues.json` | No |
+
+To use JSON files, set `STORAGE_BACKEND=json` in `.env` and run the server. No database or `migrate` is needed in that mode. The API behaves exactly the same either way.
+
+**Database tables** (created by `python manage.py migrate`):
+
+```
+reporters                     issues
+─────────────                 ──────────────────────────
+id     bigint  PK  ◄──┐       id           bigint  PK
+name   varchar(100)   │       title        varchar(200)
+email  varchar(254)   │       description  text
+team   varchar(50)    │       status       varchar(20)
+                      │       priority     varchar(20)
+                      └────── reporter_id  bigint  FK → reporters.id
+                              created_at   timestamp
+```
+
+To look at the tables directly:
+
+```bash
+docker compose exec postgres psql -U postgres -d devtrack -c "select * from issues"
+```
 
 ---
 
@@ -57,36 +99,43 @@ Base URL: `http://127.0.0.1:8000`
 | POST | `/api/reporters/` | Create a new reporter |
 | GET | `/api/reporters/` | Get all reporters |
 | GET | `/api/reporters/?id=1` | Get a single reporter by ID |
+| PATCH | `/api/reporters/?id=1` | Update a reporter's name, email or team |
+| DELETE | `/api/reporters/?id=1` | Delete a reporter (only if they have no issues) |
 | POST | `/api/issues/` | Create a new issue |
 | GET | `/api/issues/` | Get all issues |
 | GET | `/api/issues/?id=1` | Get a single issue by ID |
 | GET | `/api/issues/?status=open` | Get all issues with the given status |
+| PATCH | `/api/issues/?id=1` | Update an issue (status, priority, title, …) |
+| DELETE | `/api/issues/?id=1` | Delete an issue |
 
 **Conventions**
 
-- Request and response bodies are JSON. For POST requests, set the header `Content-Type: application/json` (in Postman: Body → raw → JSON).
+- Request and response bodies are JSON. For POST and PATCH, set the header `Content-Type: application/json` (in Postman: Body → raw → JSON).
 - **Keep the trailing slash** (`/api/issues/`, not `/api/issues`).
+- PATCH and DELETE need `?id=` in the URL.
+- **IDs are assigned by the server.** An `id` sent in a POST body is ignored.
 - Every error response has the shape `{"error": "<message>"}`.
-- Other methods (PUT, DELETE, …) return `405 Method Not Allowed`.
+- Other methods (e.g. PUT) return `405 Method Not Allowed`.
 
 ### Status codes
 
 | Code | When |
 |---|---|
-| 200 OK | A GET request succeeded |
-| 201 Created | A POST request created a record |
-| 400 Bad Request | Invalid JSON, a missing field, a validation failure, an unknown `reporter_id`, or a non-integer `?id=` |
+| 200 OK | GET, PATCH or DELETE succeeded |
+| 201 Created | POST created a record |
+| 400 Bad Request | Invalid JSON, a missing field, a validation failure, an unknown `reporter_id`, a missing or non-integer `?id=`, or a field that can't be updated |
 | 404 Not Found | No record matches `?id=` |
-| 405 Method Not Allowed | The method is not GET or POST |
-| 409 Conflict | A record with the given `id` already exists |
+| 405 Method Not Allowed | The method isn't GET, POST, PATCH or DELETE |
+| 409 Conflict | Deleting a reporter who still has issues |
 
 ---
 
-### POST `/api/reporters/` — create a reporter
+### Reporters
+
+#### POST `/api/reporters/` — create a reporter
 
 | Field | Type | Required | Rules |
 |---|---|---|---|
-| `id` | integer | no | Positive and unique. If left out, the next free ID is used. |
 | `name` | string | yes | Cannot be empty |
 | `email` | string | yes | Must contain `@` |
 | `team` | string | yes | Cannot be empty, e.g. `backend`, `frontend`, `devops` |
@@ -95,7 +144,6 @@ Base URL: `http://127.0.0.1:8000`
 
 ```json
 {
-  "id": 1,
   "name": "Asha Rao",
   "email": "asha@example.com",
   "team": "backend"
@@ -119,15 +167,9 @@ Base URL: `http://127.0.0.1:8000`
 { "error": "Invalid email" }
 ```
 
-Other 400 messages: `Name cannot be empty`, `Team cannot be empty`, `Missing required field(s): email, team`, `Request body must be valid JSON`, `id must be a positive integer`.
+Other 400 messages: `Name cannot be empty`, `Team cannot be empty`, `Missing required field(s): email, team`, `Request body must be valid JSON`.
 
-**Response — 409 Conflict**
-
-```json
-{ "error": "Reporter with id 1 already exists" }
-```
-
-### GET `/api/reporters/` — get all reporters
+#### GET `/api/reporters/` — get all reporters
 
 **Response — 200 OK**
 
@@ -140,7 +182,7 @@ Other 400 messages: `Name cannot be empty`, `Team cannot be empty`, `Missing req
 
 Returns `[]` when there are no reporters.
 
-### GET `/api/reporters/?id=1` — get one reporter
+#### GET `/api/reporters/?id=1` — get one reporter
 
 **Response — 200 OK**
 
@@ -160,20 +202,58 @@ Returns `[]` when there are no reporters.
 { "error": "id must be an integer" }
 ```
 
+#### PATCH `/api/reporters/?id=1` — update a reporter
+
+Send only the fields you want to change: any of `name`, `email`, `team`. The same rules as POST apply.
+
+**Request**
+
+```json
+{ "team": "devops" }
+```
+
+**Response — 200 OK**
+
+```json
+{ "id": 1, "name": "Asha Rao", "email": "asha@example.com", "team": "devops" }
+```
+
+**Errors**
+
+- `400`: `{"error": "Cannot update field(s): id. Allowed: name, email, team"}`, `{"error": "No fields to update"}`, `{"error": "id query parameter is required, e.g. ?id=1"}`, or a validation message
+- `404`: `{"error": "Reporter not found"}`
+
+#### DELETE `/api/reporters/?id=1` — delete a reporter
+
+**Response — 200 OK**
+
+```json
+{ "message": "Reporter 1 deleted" }
+```
+
+**Response — 409 Conflict**: the reporter still has issues. Delete those issues, or move them to another reporter with `PATCH /api/issues/?id=…` and `{"reporter_id": 2}`.
+
+```json
+{ "error": "Reporter 1 has 2 issue(s). Delete them or move them to another reporter first" }
+```
+
+**Response — 404 Not Found**: `{"error": "Reporter not found"}`
+
 ---
 
-### POST `/api/issues/` — create an issue
+### Issues
+
+#### POST `/api/issues/` — create an issue
 
 | Field | Type | Required | Rules |
 |---|---|---|---|
-| `id` | integer | no | Positive and unique. If left out, the next free ID is used. |
 | `title` | string | yes | Cannot be empty |
 | `description` | string | yes | Full details (may be empty) |
 | `status` | string | yes | One of `open`, `in_progress`, `resolved`, `closed` |
 | `priority` | string | yes | One of `low`, `medium`, `high`, `critical` |
 | `reporter_id` | integer | yes | Must be the ID of an existing reporter |
 
-The server adds `created_at` (the time the issue was created). The response also includes a `message` built by the issue's `describe()` method. It depends on the priority:
+The server adds `id` and `created_at`. The response also includes a `message` built by the issue's `describe()` method, which depends on the priority:
 
 | Priority | Class used | `message` |
 |---|---|---|
@@ -204,7 +284,7 @@ The server adds `created_at` (the time the issue was created). The response also
   "status": "open",
   "priority": "critical",
   "reporter_id": 1,
-  "created_at": "2026-10-20 17:53:51.216222",
+  "created_at": "2026-10-20 18:07:57.965079",
   "message": "[URGENT] Login button not working on mobile — needs immediate attention"
 }
 ```
@@ -215,19 +295,13 @@ The server adds `created_at` (the time the issue was created). The response also
 { "error": "Title cannot be empty" }
 ```
 
-Other 400 messages: `Status must be one of: open, in_progress, resolved, closed`, `Priority must be one of: low, medium, high, critical`, `Reporter with id 9 does not exist`, `Missing required field(s): ...`, `Request body must be valid JSON`.
+Other 400 messages: `Status must be one of: open, in_progress, resolved, closed`, `Priority must be one of: low, medium, high, critical`, `Reporter with id 9 does not exist`, `reporter_id must be a positive integer`, `Missing required field(s): ...`, `Request body must be valid JSON`.
 
-**Response — 409 Conflict**
+#### GET `/api/issues/` — get all issues
 
-```json
-{ "error": "Issue with id 1 already exists" }
-```
+**Response — 200 OK**: a list of every issue, ordered by `id` (`[]` if there are none).
 
-### GET `/api/issues/` — get all issues
-
-**Response — 200 OK**: a list of every issue (`[]` if there are none).
-
-### GET `/api/issues/?id=1` — get one issue
+#### GET `/api/issues/?id=1` — get one issue
 
 **Response — 200 OK**
 
@@ -239,7 +313,7 @@ Other 400 messages: `Status must be one of: open, in_progress, resolved, closed`
   "status": "open",
   "priority": "critical",
   "reporter_id": 1,
-  "created_at": "2026-10-20 17:53:51.216222"
+  "created_at": "2026-10-20 18:07:57.965079"
 }
 ```
 
@@ -249,7 +323,7 @@ Other 400 messages: `Status must be one of: open, in_progress, resolved, closed`
 { "error": "Issue not found" }
 ```
 
-### GET `/api/issues/?status=open` — filter issues by status
+#### GET `/api/issues/?status=open` — filter issues by status
 
 **Response — 200 OK**: a list of the issues whose `status` matches (`[]` if none match).
 
@@ -261,6 +335,46 @@ Other 400 messages: `Status must be one of: open, in_progress, resolved, closed`
 
 If both `id` and `status` are given, `id` wins.
 
+#### PATCH `/api/issues/?id=1` — update an issue
+
+Send only the fields you want to change: any of `title`, `description`, `status`, `priority`, `reporter_id`. The same rules as POST apply. `id` and `created_at` can't be changed. If the priority changes, the issue becomes the matching class, so `message` changes too.
+
+**Request**
+
+```json
+{ "status": "in_progress", "priority": "high" }
+```
+
+**Response — 200 OK**
+
+```json
+{
+  "id": 1,
+  "title": "Login button not working on mobile",
+  "description": "Users on iOS 17 cannot tap the login button",
+  "status": "in_progress",
+  "priority": "high",
+  "reporter_id": 1,
+  "created_at": "2026-10-20 18:07:57.965079",
+  "message": "Login button not working on mobile [high]"
+}
+```
+
+**Errors**
+
+- `400`: `{"error": "Cannot update field(s): created_at. Allowed: title, description, status, priority, reporter_id"}`, `{"error": "No fields to update"}`, `{"error": "id query parameter is required, e.g. ?id=1"}`, or a validation message
+- `404`: `{"error": "Issue not found"}`
+
+#### DELETE `/api/issues/?id=1` — delete an issue
+
+**Response — 200 OK**
+
+```json
+{ "message": "Issue 1 deleted" }
+```
+
+**Response — 404 Not Found**: `{"error": "Issue not found"}`
+
 ---
 
 ## Data model and OOP design
@@ -268,9 +382,9 @@ If both `id` and `status` are given, `id` wins.
 **Reporter**: `id`, `name`, `email`, `team`.
 **Issue**: `id`, `title`, `description`, `status`, `priority`, `reporter_id`, `created_at`.
 
-The relationship is **one Reporter → many Issues**. Each issue stores the `reporter_id` of the person who filed it. Reporters do not store a list of their issues.
+The relationship is **one Reporter → many Issues**. Each issue stores the `reporter_id` of the person who filed it. In PostgreSQL this is a foreign key from `issues.reporter_id` to `reporters.id`.
 
-All classes live in [issues/models.py](issues/models.py):
+The OOP classes live in [issues/models.py](issues/models.py):
 
 ```
 BaseEntity (abstract: validate(), to_dict())
@@ -280,26 +394,41 @@ BaseEntity (abstract: validate(), to_dict())
     └── LowPriorityIssue (describe() overridden)
 ```
 
-- **`BaseEntity`** is an abstract base class. It declares `validate()` as an `@abstractmethod`, so every entity must implement it. It also provides a shared `to_dict()` that turns any entity into a dict ready for JSON.
+- **`BaseEntity`** is an abstract base class. It declares `validate()` as an `@abstractmethod`, so every entity must implement it. It also provides a shared `to_dict()` that turns any entity into a dict.
 - **`Reporter`** and **`Issue`** inherit from `BaseEntity` and each implement their own `validate()`.
-- **`CriticalIssue`** and **`LowPriorityIssue`** inherit from `Issue` and override `describe()`. This is method overriding: the view calls `issue.describe()` without caring which class it is, and the subclass decides the text.
+- **`CriticalIssue`** and **`LowPriorityIssue`** inherit from `Issue` and override `describe()` (method overriding). The view calls `issue.describe()` without caring which class it has.
 
-On `POST /api/issues/`, the view picks the class from the priority, calls `validate()`, saves `to_dict()` to `issues.json`, and adds `describe()` to the response as `message`.
+On `POST /api/issues/`, the view picks the class from the priority, calls `validate()`, saves `to_dict()`, and adds `describe()` to the response as `message`.
+
+Storage uses the same pattern ([issues/storage.py](issues/storage.py)):
+
+```
+BaseStorage (abstract: find_all, find_by_id, create, update, delete)
+├── JsonStorage       reads and writes data/*.json
+└── DatabaseStorage   uses the Django ORM models in issues/db_models.py
+```
 
 ---
 
 ## Design decision
 
-**The `message` from `describe()` is returned in the POST response but not saved to `issues.json`.**
+**Business rules and storage are kept in separate classes.**
 
-The message can always be rebuilt from the stored `title` and `priority`, so saving it would duplicate data. Duplicated data also goes stale: if an issue's priority were later changed from `low` to `critical`, a stored message would still say "handle when free". Saving only the real fields (`to_dict()`) keeps `issues.json` as the single source of truth.
+The OOP classes (`Reporter`, `Issue` and the subclasses) decide *what is valid* and *how an issue describes itself*. They know nothing about files or databases. Storage classes (`JsonStorage`, `DatabaseStorage`) decide *where records are saved*. They know nothing about validation. Views connect the two, and they only ever talk to the abstract `BaseStorage` interface.
+
+Why:
+
+- **The move from JSON files to PostgreSQL didn't touch any business rules.** Adding the database meant writing one new class, `DatabaseStorage`. `validate()` and `describe()` stayed exactly the same, and both backends pass the same tests.
+- **Each rule is written once.** "A title can't be empty" lives only in `Issue.validate()`, and the same check runs for POST, PATCH, JSON and database.
+- **Polymorphism, twice.** The views call `issue.describe()` without knowing which `Issue` subclass they have, and call `storage.create(...)` without knowing which storage backend they have.
 
 Other decisions:
 
-- **Validation lives in the classes, not the views.** `Reporter.validate()` and `Issue.validate()` raise `ValueError`, and the view turns any `ValueError` into a 400 response. The rules are written once and reused anywhere an entity is created.
-- **`id` is optional on POST.** The brief's sample request sends an `id`, so a client-supplied `id` is accepted and checked for uniqueness (409 if taken). If it's left out, the server assigns the next free ID, so clients don't have to track IDs themselves.
-- **`reporter_id` must point to an existing reporter.** Without this check an issue could reference someone who doesn't exist, which breaks the 1:many relationship.
-- **File access is in one module** ([issues/storage.py](issues/storage.py)). Views never open files directly, so moving to a real database later would only change that one file.
+- **The `message` from `describe()` is returned but never stored.** It can be rebuilt from `title` and `priority` at any time. A stored copy would go stale when the priority changes (for example `low` → `critical`).
+- **Django ORM models are separate from the OOP classes** ([issues/db_models.py](issues/db_models.py)). An ORM model can't inherit from the brief's `BaseEntity` (their metaclasses clash), and its `__dict__` contains Django internals that would leak into `to_dict()`.
+- **The server assigns IDs.** With a database, auto-increment IDs avoid two clients picking the same number. The `id` in the brief's sample request is accepted but ignored, and on an empty database the first issue still gets `id: 1`.
+- **A reporter with issues can't be deleted** (409). Deleting them would leave issues pointing to a reporter who doesn't exist. The database enforces this as well (`on_delete=PROTECT`).
+- **PATCH instead of PUT.** Clients usually change one or two fields (most often `status`), so they send only what changes.
 
 ---
 
@@ -310,6 +439,10 @@ Other decisions:
 **Success: `POST /api/issues/` (201 Created)**
 
 ![POST /api/issues/ success](docs/screenshots/create-issue-success.png)
+
+**Success: `PATCH /api/issues/?id=1` (200 OK)**
+
+![PATCH /api/issues/ success](docs/screenshots/update-issue-success.png)
 
 **Failure: `POST /api/issues/` with an empty title (400 Bad Request)**
 
@@ -329,20 +462,23 @@ A ready-made Postman collection with every request is in [docs/DevTrack.postman_
 dev-track/
 ├── manage.py                 # Django command-line entry point
 ├── requirements.txt          # Python dependencies
-├── .env.example              # Optional settings template
+├── docker-compose.yaml       # PostgreSQL 18 container
+├── .env.example              # Settings template (copy to .env)
 ├── data/
-│   ├── reporters.json        # Reporter records
-│   └── issues.json           # Issue records
-├── devtrack/                 # Django project (settings and root URLs)
+│   ├── reporters.json        # Reporter records (JSON mode)
+│   └── issues.json           # Issue records (JSON mode)
+├── devtrack/                 # Django project: settings and root URLs
 │   ├── settings.py
 │   ├── urls.py
 │   ├── asgi.py
 │   └── wsgi.py
-├── issues/                   # Django app with the API
+├── issues/                   # Django app: the API
 │   ├── models.py             # OOP classes: BaseEntity, Reporter, Issue, subclasses
+│   ├── db_models.py          # Django ORM models = PostgreSQL tables
+│   ├── storage.py            # BaseStorage, JsonStorage, DatabaseStorage
 │   ├── views.py              # Endpoint logic
 │   ├── urls.py               # Endpoint routes
-│   ├── storage.py            # JSON file read/write helpers
+│   ├── migrations/           # Database table definitions generated by Django
 │   ├── apps.py
 │   └── tests.py              # Automated tests
 ├── docs/

@@ -1,14 +1,22 @@
+# PostgreSQL for DevTrack.  Start: docker compose up -d   Stop: docker compose down
+# Values come from .env when present, otherwise the defaults below
+# (which match the defaults in devtrack/settings.py).
 services:
   postgres:
-    image: postgres:latest
+    image: postgres:18
     ports:
       - "${POSTGRES_PORT:-5433}:5432"
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin}
+      POSTGRES_DB: ${POSTGRES_DB:-devtrack}
     volumes:
       - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   postgres_data:
